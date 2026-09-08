@@ -1,0 +1,4 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>net48</TargetFramework><LangVersion>latest</LangVersion><Nullable>enable</Nullable><AssemblyName>BDVM.MultiplayerBridge</AssemblyName><RootNamespace>BDVM.MultiplayerBridge</RootNamespace></PropertyGroup>
+  <ItemGroup><Compile Remove="Domain\**\*.cs" /><Compile Remove="Integration\**\*.cs" /><ProjectReference Include="..\BDVM.Common\BDVM.Common.csproj" /></ItemGroup>
+</Project>
