@@ -24,9 +24,11 @@ public sealed class RuntimeCompanyIntentExecutor : ICompanyIntentExecutor
     private readonly IAcquisitionCheckpointSink checkpoints;
     private readonly Action<string> stage;
     private readonly Action<string> log;
+    private readonly IReadOnlyList<string> starterBundleDefinitionIds;
 
     public RuntimeCompanyIntentExecutor(AcquisitionRuntimeStateProvider state, INetworkRoleDetector authority,
-        IExistingVehicleOwnershipAdapter world, IAcquisitionCheckpointSink checkpoints, Action<string> stage, Action<string> log)
+        IExistingVehicleOwnershipAdapter world, IAcquisitionCheckpointSink checkpoints, Action<string> stage, Action<string> log,
+        IReadOnlyList<string>? starterBundleDefinitionIds = null)
     {
         this.state = state ?? throw new ArgumentNullException(nameof(state));
         this.authority = authority ?? throw new ArgumentNullException(nameof(authority));
@@ -34,12 +36,15 @@ public sealed class RuntimeCompanyIntentExecutor : ICompanyIntentExecutor
         this.checkpoints = checkpoints ?? throw new ArgumentNullException(nameof(checkpoints));
         this.stage = stage ?? throw new ArgumentNullException(nameof(stage));
         this.log = log ?? throw new ArgumentNullException(nameof(log));
+        this.starterBundleDefinitionIds = starterBundleDefinitionIds ?? Array.Empty<string>();
     }
 
     public ProtocolResult Execute(PeerContext peer, CompanyProtocolEnvelope envelope, CompanyIntent intent)
     {
         if (!NetworkAuthorityPolicy.CanExecuteEconomy(authority.Detect(), out var refusal)) return Rejected(envelope, "host-authority-required", refusal);
         state.EnsurePersistentPlayer(peer.AuthenticatedPlayerId, 0);
+        if (starterBundleDefinitionIds.Count > 0)
+            state.GrantStarterBundleFor("starter-bundle:" + peer.AuthenticatedPlayerId, peer.AuthenticatedPlayerId, starterBundleDefinitionIds, authority);
         var economy = state.Current!.Economy;
         string code;
         switch (intent.Type)
