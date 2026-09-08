@@ -1,1 +1,1 @@
-{"id":"BDVM.MultiplayerBridge","version":"1.0.0","kind":"bridge","optional":true,"dependencies":["BDVM.Common"]}
+{"id":"BDVM.MultiplayerBridge","version":"1.0.0","kind":"bridge","optional":true,"standalone":false,"dependencies":["BDVM.Common"],"runtimeDependencies":["Multiplayer","MultiplayerAPI"]}
