@@ -7,9 +7,9 @@ This file is the published compatibility contract for **BDVM.MultiplayerBridge 1
 | Surface | Accepted line | Refusal behavior |
 | --- | --- | --- |
 | Module API | 1.x | An older or newer major is refused before registration. |
-| Checkpoint | `bdvm.checkpoint` schema 2 | Unknown schemas and legacy DVCompany packages are refused without mutation. |
+| Checkpoint | `bdvm.checkpoint` schema 2 | Unknown schemas and unsupported legacy packages are refused without mutation. |
 | Web API | 1.0 when applicable | An incompatible web module is disabled without stopping the host or other modules. |
-| External runtime dependencies | Multiplayer and MultiplayerAPI | A missing optional runtime disables only the dependent bridge or feature. |
+| External runtime dependencies | BDVM Multiplayer fork and `MultiplayerAPI` 1.4.0 or later | A missing or older API is refused before the bridge registers because it cannot provide authenticated durable individual wallets. |
 
 ## Supported profiles
 
@@ -26,4 +26,3 @@ This release is selected by these dependency-closed profiles: **complete**. The 
 | Older major | Refuse before registration and leave authoritative state untouched. |
 
 Game, save/reload and host/client behavior still requires the release's documented manual runtime campaign. Repository CI validates this contract and metadata; it does not claim Unity runtime validation.
-

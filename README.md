@@ -9,7 +9,7 @@
 | Module kind | Optional runtime bridge |
 | Target framework | .NET Framework 4.8 (`net48`) |
 | Build contract | `BDVM.Common` |
-| Runtime dependencies | `Multiplayer`, `MultiplayerAPI` |
+| Runtime dependencies | BDVM Multiplayer fork with `MultiplayerAPI` 1.4.0 or later |
 | Standalone | No |
 
 The Multiplayer mod and its DLLs are not bundled. If Multiplayer is absent, omit this bridge; solo BDVM features remain usable. The current `BDVM.Full` bundle declares Multiplayer as a requirement because it includes this bridge.
@@ -22,11 +22,14 @@ The Multiplayer mod and its DLLs are not bundled. If Multiplayer is absent, omit
 - Return snapshots and results to clients while preventing direct client-side writes.
 - Journal request IDs and track client requests so retries cannot duplicate an operation.
 - Resolve persistent multiplayer identities instead of relying on transient connection order.
+- Keep each authenticated player wallet durable, initialized exactly once and separate from the shared vanilla host wallet.
+- Scope private snapshots to the authenticated player and their company.
+- Carry protocol-v3 module operations as bounded action/payload pairs while keeping the authenticated peer identity outside the payload.
 - Adapt packet registration and peer roles to the compatible `MultiplayerAPI`.
 
 ## Key surfaces
 
-The portable protocol includes `CompanyProtocolEnvelope`, `CompanyIntent`, `ProtocolResult`, `CompanyProtocolHost`, codecs, validators and request journals. Runtime adapters include server/client protocol adapters, `PersistentMultiplayerPeerIdentityResolver`, `RuntimeCompanyIntentExecutor`, role detection and authoritative state readers.
+The portable protocol includes `CompanyProtocolEnvelope`, `CompanyIntent`, `ProtocolResult`, `CompanyProtocolHost`, codecs, validators, authenticated actor routing and request journals. Runtime adapters include server/client protocol adapters, `PersistentMultiplayerPeerIdentityResolver`, `RuntimeCompanyIntentExecutor`, role detection and authoritative state readers. Protocol v3 retains bounded decoding compatibility with v1 and v2.
 
 ## Boundaries
 
@@ -34,7 +37,7 @@ This repository is not the Multiplayer mod, does not provide networking by itsel
 
 ## Dependencies and composition
 
-The small project builds against `BDVM.Common`; `Domain/` and `Integration/` are temporarily linked into `BDVM.Full`, where the integration compiles against `MultiplayerAPI`. Standalone packaging will make those runtime requirements explicit without bundling the upstream DLLs.
+The small project builds against `BDVM.Common`; `Domain/` and `Integration/` are temporarily linked into `BDVM.Full`, where the integration compiles against `MultiplayerAPI` 1.4.0 or later. Standalone packaging will make those runtime requirements explicit without bundling the upstream DLLs.
 
 ## Build
 
@@ -44,11 +47,11 @@ The marker assembly can be built with Common beside this repository:
 dotnet build .\BDVM.MultiplayerBridge.csproj -c Release
 ```
 
-To compile the actual runtime adapter, build `BDVM.Full` with the compatible `MultiplayerAPI.dll` available either from the integration workspace or under the game's `Mods/Multiplayer` directory.
+To compile the actual runtime adapter, build `BDVM.Full` with `MultiplayerAPI.dll` 1.4.0 or later available either from the integration workspace or under the game's `Mods/Multiplayer` directory. Earlier API builds do not expose the persistent individual-wallet capability and are refused by the bridge.
 
 ## Testing and installation
 
-BDVM domain tests cover validation, journaling, host execution and client observation. The Multiplayer fork retains its own validation suite. Install matching versions of `BDVM.Full` and the Multiplayer fork; do not install this DLL alone.
+BDVM domain tests cover validation, journaling, actor visibility, host execution and client observation. The Multiplayer fork retains its own protocol and durable-wallet validation suite. Install matching versions of `BDVM.Full` and the Multiplayer fork; do not install this DLL alone.
 
 ## Upstream and provenance
 

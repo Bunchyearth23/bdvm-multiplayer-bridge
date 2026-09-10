@@ -27,7 +27,8 @@ public enum CompanyIntentType : byte
     ChangeMembershipPolicy = 9,
     LeaveCompany = 10,
     TransferLeadership = 11,
-    DissolveCompany = 12
+    DissolveCompany = 12,
+    ModuleOperation = 13
 }
 
 public enum ProtocolResultStatus : byte
@@ -40,7 +41,7 @@ public enum ProtocolResultStatus : byte
 public static class CompanyProtocolLimits
 {
     public const ushort MinimumSupportedVersion = 1;
-    public const ushort CurrentVersion = 2;
+    public const ushort CurrentVersion = 3;
     public const int MaximumEnvelopeBytes = 16 * 1024;
     public const int MaximumPayloadBytes = 8 * 1024;
     public const int MaximumIdBytes = 96;
@@ -79,6 +80,8 @@ public sealed class CompanyIntent
     public string MembershipPolicy { get; set; } = "";
     public long DebtAmount { get; set; }
     public long PenaltyAmount { get; set; }
+    public string ModuleAction { get; set; } = "";
+    public string ModulePayloadJson { get; set; } = "";
 }
 
 public sealed class ProtocolResult
@@ -104,6 +107,11 @@ public interface ICompanyIntentExecutor
     ProtocolResult Execute(PeerContext peer, CompanyProtocolEnvelope envelope, CompanyIntent intent);
 }
 
+public interface IAuthoritativeModuleIntentExecutor
+{
+    ProtocolResult Execute(string authenticatedPlayerId, string requestId, string action, string payloadJson);
+}
+
 public interface IAuthoritativeSnapshotSource
 {
     byte[] CreateSnapshotFor(string authenticatedPlayerId);
@@ -116,15 +124,19 @@ public interface IClientObservationSink
 
 public sealed class ProtocolRequestJournal
 {
+    private const int MaximumTransientRequests = 4096;
     private readonly object gate = new object();
     private readonly Dictionary<string, StoredRequest> requests = new Dictionary<string, StoredRequest>(StringComparer.Ordinal);
+    private readonly Dictionary<string, StoredRequest> transientRequests = new Dictionary<string, StoredRequest>(StringComparer.Ordinal);
+    private readonly Queue<string> transientOrder = new Queue<string>();
 
     public ProtocolResult ExecuteOnce(PeerContext peer, CompanyProtocolEnvelope envelope, CompanyIntent intent, ICompanyIntentExecutor executor)
     {
         var fingerprint = CompanyProtocolCodec.Fingerprint(envelope);
+        var transient = intent.Type == CompanyIntentType.ModuleOperation && string.Equals(intent.ModuleAction, "state.get", StringComparison.Ordinal);
         lock (gate)
         {
-            if (requests.TryGetValue(envelope.RequestId, out var known))
+            if (requests.TryGetValue(envelope.RequestId, out var known) || transientRequests.TryGetValue(envelope.RequestId, out known))
             {
                 if (!string.Equals(known.Fingerprint, fingerprint, StringComparison.Ordinal))
                     return Rejected(envelope.RequestId, "request-id-reused", "The request ID is already bound to a different request.");
@@ -148,7 +160,15 @@ public sealed class ProtocolRequestJournal
                 CompanyProtocolCodec.Utf8Length(result.Detail) > CompanyProtocolLimits.MaximumDetailBytes ||
                 (result.Payload?.Length ?? 0) > CompanyProtocolLimits.MaximumPayloadBytes - 1024)
                 result = Rejected(envelope.RequestId, "result-too-large", "The host result exceeds protocol limits.");
-            requests.Add(envelope.RequestId, new StoredRequest(fingerprint, Clone(result)));
+            var stored = new StoredRequest(fingerprint, Clone(result));
+            if (transient)
+            {
+                transientRequests.Add(envelope.RequestId, stored);
+                transientOrder.Enqueue(envelope.RequestId);
+                while (transientOrder.Count > MaximumTransientRequests)
+                    transientRequests.Remove(transientOrder.Dequeue());
+            }
+            else requests.Add(envelope.RequestId, stored);
             return Clone(result);
         }
     }
@@ -326,6 +346,11 @@ public static class CompanyIntentCodec
                 writer.Write(intent.DebtAmount);
                 writer.Write(intent.PenaltyAmount);
             }
+            if (protocolVersion >= 3)
+            {
+                CompanyProtocolCodec.WriteString(writer, intent.ModuleAction, CompanyProtocolLimits.MaximumIdBytes);
+                CompanyProtocolCodec.WriteString(writer, intent.ModulePayloadJson, CompanyProtocolLimits.MaximumPayloadBytes - 1024);
+            }
         }
         if (stream.Length > CompanyProtocolLimits.MaximumPayloadBytes) throw new InvalidDataException("payload-too-large");
         return stream.ToArray();
@@ -357,6 +382,11 @@ public static class CompanyIntentCodec
             intent.MembershipPolicy = CompanyProtocolCodec.ReadString(reader, CompanyProtocolLimits.MaximumIdBytes);
             intent.DebtAmount = reader.ReadInt64();
             intent.PenaltyAmount = reader.ReadInt64();
+        }
+        if (protocolVersion >= 3)
+        {
+            intent.ModuleAction = CompanyProtocolCodec.ReadString(reader, CompanyProtocolLimits.MaximumIdBytes);
+            intent.ModulePayloadJson = CompanyProtocolCodec.ReadString(reader, CompanyProtocolLimits.MaximumPayloadBytes - 1024);
         }
         if (stream.Position != stream.Length) throw new InvalidDataException("trailing-payload-data");
         return intent;
@@ -395,6 +425,9 @@ public static class CompanyIntentValidator
                 return Required(intent.TargetPlayerId, CompanyProtocolLimits.MaximumIdBytes, "target-player-id");
             case CompanyIntentType.DissolveCompany:
                 return intent.DebtAmount < 0 || intent.PenaltyAmount < 0 ? "invalid-liquidation-liability" : null;
+            case CompanyIntentType.ModuleOperation:
+                return Required(intent.ModuleAction, CompanyProtocolLimits.MaximumIdBytes, "module-action")
+                    ?? Required(intent.ModulePayloadJson, CompanyProtocolLimits.MaximumPayloadBytes - 1024, "module-payload");
             default:
                 return "unknown-intent-type";
         }
@@ -406,9 +439,12 @@ public static class CompanyIntentValidator
 
 public sealed class ClientRequestTracker
 {
+    private const int MaximumTrackedRequests = 256;
+    private readonly object gate = new object();
     private readonly TimeSpan retryAfter;
     private readonly TimeSpan timeoutAfter;
     private readonly Dictionary<string, PendingRequest> pending = new Dictionary<string, PendingRequest>(StringComparer.Ordinal);
+    private readonly Queue<string> submissionOrder = new Queue<string>();
 
     public ClientRequestTracker(TimeSpan retryAfter, TimeSpan timeoutAfter)
     {
@@ -417,36 +453,71 @@ public sealed class ClientRequestTracker
         this.timeoutAfter = timeoutAfter;
     }
 
-    public void Track(CompanyProtocolEnvelope envelope, DateTimeOffset now) => pending[envelope.RequestId] = new PendingRequest(envelope, now);
+    public void Track(CompanyProtocolEnvelope envelope, DateTimeOffset now)
+    {
+        lock (gate)
+        {
+            if (pending.ContainsKey(envelope.RequestId))
+            {
+                var known = pending[envelope.RequestId];
+                if (!string.Equals(CompanyProtocolCodec.Fingerprint(known.Envelope), CompanyProtocolCodec.Fingerprint(envelope), StringComparison.Ordinal))
+                    throw new InvalidOperationException("client-request-id-reused");
+                return;
+            }
+
+            while (pending.Count >= MaximumTrackedRequests && submissionOrder.Count > 0)
+            {
+                var oldest = submissionOrder.Peek();
+                if (!pending.TryGetValue(oldest, out var candidate)) { submissionOrder.Dequeue(); continue; }
+                if (candidate.Result == null) break;
+                submissionOrder.Dequeue();
+                pending.Remove(oldest);
+            }
+            if (pending.Count >= MaximumTrackedRequests)
+                throw new InvalidOperationException("client-request-capacity-exhausted");
+            pending.Add(envelope.RequestId, new PendingRequest(envelope, now));
+            submissionOrder.Enqueue(envelope.RequestId);
+        }
+    }
 
     public IReadOnlyList<CompanyProtocolEnvelope> DueRetries(DateTimeOffset now)
     {
-        var due = new List<CompanyProtocolEnvelope>();
-        foreach (var item in pending.Values)
+        lock (gate)
         {
-            if (item.Result != null || now - item.FirstSent >= timeoutAfter) continue;
-            if (now - item.LastSent >= retryAfter) { item.LastSent = now; due.Add(item.Envelope); }
+            var due = new List<CompanyProtocolEnvelope>();
+            foreach (var item in pending.Values)
+            {
+                if (item.Result != null || now - item.FirstSent >= timeoutAfter) continue;
+                if (now - item.LastSent >= retryAfter) { item.LastSent = now; due.Add(item.Envelope); }
+            }
+            return due;
         }
-        return due;
     }
 
     public ProtocolResult ResultOrTimeout(string requestId, DateTimeOffset now)
     {
-        if (!pending.TryGetValue(requestId, out var item)) return ProtocolRequestJournal.Rejected(requestId, "unknown-request", "The client does not track this request.");
-        if (item.Result != null) return item.Result;
-        if (now - item.FirstSent < timeoutAfter) return new ProtocolResult { RequestId = requestId, Status = ProtocolResultStatus.TimedOut, Code = "pending" };
-        return new ProtocolResult { RequestId = requestId, Status = ProtocolResultStatus.TimedOut, Code = "request-timeout" };
+        lock (gate)
+        {
+            if (!pending.TryGetValue(requestId, out var item)) return ProtocolRequestJournal.Rejected(requestId, "unknown-request", "The client does not track this request.");
+            if (item.Result != null) return item.Result;
+            if (now - item.FirstSent < timeoutAfter) return new ProtocolResult { RequestId = requestId, Status = ProtocolResultStatus.TimedOut, Code = "pending" };
+            return new ProtocolResult { RequestId = requestId, Status = ProtocolResultStatus.TimedOut, Code = "request-timeout" };
+        }
     }
 
     public bool Accept(ProtocolResult result)
     {
-        if (!pending.TryGetValue(result.RequestId, out var item)) return false;
-        if (result.Status != ProtocolResultStatus.Succeeded && result.Status != ProtocolResultStatus.Rejected) return false;
-        item.Result = result;
-        return true;
+        lock (gate)
+        {
+            if (!pending.TryGetValue(result.RequestId, out var item)) return false;
+            if (result.Status != ProtocolResultStatus.Succeeded && result.Status != ProtocolResultStatus.Rejected) return false;
+            item.Result = result;
+            return true;
+        }
     }
 
-    public IReadOnlyList<CompanyProtocolEnvelope> RequestsToResumeAfterReconnect() => pending.Values.Where(x => x.Result == null).Select(x => x.Envelope).ToList();
+    public IReadOnlyList<CompanyProtocolEnvelope> RequestsToResumeAfterReconnect()
+    { lock (gate) return pending.Values.Where(x => x.Result == null).Select(x => x.Envelope).ToList(); }
 
     private sealed class PendingRequest
     {

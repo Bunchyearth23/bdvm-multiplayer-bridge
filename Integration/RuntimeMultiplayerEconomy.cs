@@ -25,10 +25,13 @@ public sealed class RuntimeCompanyIntentExecutor : ICompanyIntentExecutor
     private readonly Action<string> stage;
     private readonly Action<string> log;
     private readonly IReadOnlyList<string> starterBundleDefinitionIds;
+    private readonly IAuthoritativeModuleIntentExecutor? moduleExecutor;
+    private readonly long startingPersonalBalance;
 
     public RuntimeCompanyIntentExecutor(AcquisitionRuntimeStateProvider state, INetworkRoleDetector authority,
         IExistingVehicleOwnershipAdapter world, IAcquisitionCheckpointSink checkpoints, Action<string> stage, Action<string> log,
-        IReadOnlyList<string>? starterBundleDefinitionIds = null)
+        IReadOnlyList<string>? starterBundleDefinitionIds = null, IAuthoritativeModuleIntentExecutor? moduleExecutor = null,
+        long startingPersonalBalance = 2000)
     {
         this.state = state ?? throw new ArgumentNullException(nameof(state));
         this.authority = authority ?? throw new ArgumentNullException(nameof(authority));
@@ -37,12 +40,15 @@ public sealed class RuntimeCompanyIntentExecutor : ICompanyIntentExecutor
         this.stage = stage ?? throw new ArgumentNullException(nameof(stage));
         this.log = log ?? throw new ArgumentNullException(nameof(log));
         this.starterBundleDefinitionIds = starterBundleDefinitionIds ?? Array.Empty<string>();
+        this.moduleExecutor = moduleExecutor;
+        if (startingPersonalBalance < 0) throw new ArgumentOutOfRangeException(nameof(startingPersonalBalance));
+        this.startingPersonalBalance = startingPersonalBalance;
     }
 
     public ProtocolResult Execute(PeerContext peer, CompanyProtocolEnvelope envelope, CompanyIntent intent)
     {
         if (!NetworkAuthorityPolicy.CanExecuteEconomy(authority.Detect(), out var refusal)) return Rejected(envelope, "host-authority-required", refusal);
-        state.EnsurePersistentPlayer(peer.AuthenticatedPlayerId, 0);
+        state.EnsurePersistentPlayer(peer.AuthenticatedPlayerId, startingPersonalBalance);
         if (starterBundleDefinitionIds.Count > 0)
             state.GrantStarterBundleFor("starter-bundle:" + peer.AuthenticatedPlayerId, peer.AuthenticatedPlayerId, starterBundleDefinitionIds, authority);
         var economy = state.Current!.Economy;
@@ -119,6 +125,15 @@ public sealed class RuntimeCompanyIntentExecutor : ICompanyIntentExecutor
                 });
                 code = acquisition.ResultCode;
                 break;
+            case CompanyIntentType.ModuleOperation:
+                if (moduleExecutor == null) return Rejected(envelope, "module-operation-unavailable", intent.ModuleAction);
+                var moduleResult = moduleExecutor.Execute(peer.AuthenticatedPlayerId, envelope.RequestId, intent.ModuleAction, intent.ModulePayloadJson)
+                    ?? Rejected(envelope, "module-executor-no-result", intent.ModuleAction);
+                moduleResult.RequestId = envelope.RequestId;
+                if (moduleResult.Status != ProtocolResultStatus.Succeeded && moduleResult.Status != ProtocolResultStatus.Rejected)
+                    return Rejected(envelope, "module-result-not-terminal", intent.ModuleAction);
+                log("[correlation=" + envelope.RequestId + "] [event=multiplayer-module-intent] player=" + peer.AuthenticatedPlayerId + ", action=" + intent.ModuleAction + ", status=" + moduleResult.Status + ", code=" + moduleResult.Code);
+                return moduleResult;
             default:
                 return Rejected(envelope, "unsupported-intent", intent.Type.ToString());
         }
