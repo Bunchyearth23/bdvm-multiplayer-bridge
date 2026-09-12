@@ -7,6 +7,7 @@ public sealed class MultiplayerNetworkApiStateReader : INetworkApiStateReader
 {
     public NetworkApiState Read()
     {
+        if (RuntimeAuthorityMode.IsDelegated) return new NetworkApiState { ExternalAuthorityConfigured = true };
         var api = MultiplayerAPI.Instance;
         return new NetworkApiState
         {
