@@ -24,14 +24,14 @@ public sealed class RuntimeCompanyIntentExecutor : ICompanyIntentExecutor
     private readonly IAcquisitionCheckpointSink checkpoints;
     private readonly Action<string> stage;
     private readonly Action<string> log;
-    private readonly IReadOnlyList<string> starterBundleDefinitionIds;
+    private readonly Func<string, long>? readInitialExternalBalance;
     private readonly IAuthoritativeModuleIntentExecutor? moduleExecutor;
     private readonly long startingPersonalBalance;
 
     public RuntimeCompanyIntentExecutor(AcquisitionRuntimeStateProvider state, INetworkRoleDetector authority,
         IExistingVehicleOwnershipAdapter world, IAcquisitionCheckpointSink checkpoints, Action<string> stage, Action<string> log,
         IReadOnlyList<string>? starterBundleDefinitionIds = null, IAuthoritativeModuleIntentExecutor? moduleExecutor = null,
-        long startingPersonalBalance = 2000)
+        long startingPersonalBalance = 125000, Func<string, long>? readInitialExternalBalance = null)
     {
         this.state = state ?? throw new ArgumentNullException(nameof(state));
         this.authority = authority ?? throw new ArgumentNullException(nameof(authority));
@@ -39,7 +39,7 @@ public sealed class RuntimeCompanyIntentExecutor : ICompanyIntentExecutor
         this.checkpoints = checkpoints ?? throw new ArgumentNullException(nameof(checkpoints));
         this.stage = stage ?? throw new ArgumentNullException(nameof(stage));
         this.log = log ?? throw new ArgumentNullException(nameof(log));
-        this.starterBundleDefinitionIds = starterBundleDefinitionIds ?? Array.Empty<string>();
+        this.readInitialExternalBalance = readInitialExternalBalance;
         this.moduleExecutor = moduleExecutor;
         if (startingPersonalBalance < 0) throw new ArgumentOutOfRangeException(nameof(startingPersonalBalance));
         this.startingPersonalBalance = startingPersonalBalance;
@@ -48,9 +48,8 @@ public sealed class RuntimeCompanyIntentExecutor : ICompanyIntentExecutor
     public ProtocolResult Execute(PeerContext peer, CompanyProtocolEnvelope envelope, CompanyIntent intent)
     {
         if (!NetworkAuthorityPolicy.CanExecuteEconomy(authority.Detect(), out var refusal)) return Rejected(envelope, "host-authority-required", refusal);
-        state.EnsurePersistentPlayer(peer.AuthenticatedPlayerId, startingPersonalBalance);
-        if (starterBundleDefinitionIds.Count > 0)
-            state.GrantStarterBundleFor("starter-bundle:" + peer.AuthenticatedPlayerId, peer.AuthenticatedPlayerId, starterBundleDefinitionIds, authority);
+        if (!state.Current!.Economy.Players.Any(player => player.PlayerId == peer.AuthenticatedPlayerId))
+            state.EnsureStartingPlayer(peer.AuthenticatedPlayerId, startingPersonalBalance, readInitialExternalBalance?.Invoke(peer.AuthenticatedPlayerId));
         var economy = state.Current!.Economy;
         string code;
         switch (intent.Type)
